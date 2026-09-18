@@ -9,6 +9,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdn.plot.ly/plotly-2.29.1.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -207,8 +208,18 @@
   table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
   thead th { position: sticky; top: 0; background: #F1F5F9; text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--bpx-line); font-weight: 650; color: var(--bpx-navy); }
   tbody td { padding: 8px 14px; border-bottom: 1px solid var(--bpx-line); white-space: nowrap; font-family: var(--bpx-font-mono); }
-  tbody td.txt { font-family: var(--bpx-font-sans); white-space: normal; word-break: break-word; min-width: 220px; max-width: 420px; }
-  #qcReportTable { table-layout: auto; }
+  tbody td.txt { font-family: var(--bpx-font-sans); white-space: normal; word-break: break-word; }
+  #qcReportTable { table-layout: fixed; width: 100%; }
+  #qcReportTable col.c-status  { width: 64px; }
+  #qcReportTable col.c-step    { width: 130px; }
+  #qcReportTable col.c-target  { width: 90px; }
+  #qcReportTable col.c-sample  { width: 90px; }
+  #qcReportTable col.c-conc    { width: 100px; }
+  #qcReportTable col.c-cq      { width: 110px; }
+  #qcReportTable col.c-allowed { width: 110px; }
+  #qcReportTable col.c-details { width: auto; }
+  #qcReportTable td, #qcReportTable th { white-space: normal; word-break: break-word; }
+  #qcReportTable td:not(.txt), #qcReportTable th { white-space: nowrap; }
   tbody tr:hover { background: #F8FAFC; }
 
   .axis-grid, .qc-grid, .ct-range-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
@@ -530,7 +541,14 @@
             </div>
             <div class="qc-summary" id="qcSummary"></div>
             <div class="table-scroll">
-              <table id="qcReportTable"><thead><tr><th>Status</th><th>Step / Check</th><th>Target</th><th>Sample / Well</th><th>Concentration</th><th>Cq (Mean/Individual)</th><th>Allowed Spec</th><th>Details</th></tr></thead><tbody></tbody></table>
+              <table id="qcReportTable">
+                <colgroup>
+                  <col class="c-status"><col class="c-step"><col class="c-target"><col class="c-sample">
+                  <col class="c-conc"><col class="c-cq"><col class="c-allowed"><col class="c-details">
+                </colgroup>
+                <thead><tr><th>Status</th><th>Step / Check</th><th>Target</th><th>Sample / Well</th><th>Concentration</th><th>Cq (Mean/Individual)</th><th>Allowed Spec</th><th>Details</th></tr></thead>
+                <tbody></tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -2645,7 +2663,7 @@ function renderQcReport(){
   }
 }
 
-function exportQcWorkbook(){
+async function exportQcWorkbook(){
   const run = loadedRuns[activeRunIndex];
   if (!run || !run.qcProfile) {
     runQcAnalysis();
@@ -2674,6 +2692,7 @@ function exportQcWorkbook(){
   }];
 
   const linearity = Object.keys(LINEARITY_CT_RANGES).map(Number).sort((a,b)=>b-a).map(e=>({Concentration:`10^${e}`,Minimum_Cq:LINEARITY_CT_RANGES[e][0],Maximum_Cq:LINEARITY_CT_RANGES[e][1]}));
+  const overallVerdict = issues.some(x=>x.status==="FAIL")?"FAIL":"PASS";
   const meta = [
     { Parameter: "Work Order", Value: currentWorkOrderName },
     { Parameter: "File", Value: run.meta.fileName },
@@ -2681,14 +2700,101 @@ function exportQcWorkbook(){
     { Parameter: "Delta Rn Threshold", Value: "> 200,000" },
     { Parameter: "Expected Targets", Value: p.targets.join(", ") },
     { Parameter: "Assignment Mode", Value: run.assignMode || "sample" },
-    { Parameter: "Overall Verdict", Value: issues.some(x=>x.status==="FAIL")?"FAIL":"PASS" }
+    { Parameter: "Overall Verdict", Value: overallVerdict }
   ];
 
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(report), "QC_Report");
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(linearity), "Linearity_Ranges");
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(meta), "QC_Metadata");
-  XLSX.writeFile(wb, `${run.meta.fileName.replace(/\.eds$/i,"")}_QC_Report.xlsx`);
+  // Brand palette (matches on-screen QC report styling)
+  const NAVY = "FF12313F", FOREST = "FF1B5E20", WHITE = "FFFFFFFF";
+  const FAIL_BG = "FFFDECEC", WARN_BG = "FFFFF6E5", PASS_BG = "FFEFF8F0";
+  const FAIL_TXT = "FFB42318", WARN_TXT = "FF92620A", PASS_TXT = "FF1B5E20";
+
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "BioVet"; wb.created = new Date();
+
+  function styleHeaderRow(ws, headerFill){
+    const row = ws.getRow(1);
+    row.eachCell(cell => {
+      cell.font = { bold: true, color: { argb: WHITE }, size: 11 };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: headerFill } };
+      cell.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
+      cell.border = { bottom: { style: "thin", color: { argb: "FFFFFFFF" } } };
+    });
+    row.height = 20;
+    ws.views = [{ state: "frozen", ySplit: 1 }];
+  }
+
+  function autoWidth(ws, minW, maxW){
+    ws.columns.forEach(col => {
+      let longest = (col.header || "").toString().length;
+      col.eachCell({ includeEmpty: true }, cell => {
+        const len = (cell.value == null ? "" : String(cell.value)).length;
+        if (len > longest) longest = len;
+      });
+      col.width = Math.max(minW || 10, Math.min(maxW || 60, longest + 2));
+    });
+  }
+
+  // --- QC_Report sheet ---
+  const wsReport = wb.addWorksheet("QC_Report");
+  wsReport.columns = [
+    { header: "Status", key: "Status" },
+    { header: "Step", key: "Step" },
+    { header: "Target", key: "Target" },
+    { header: "Sample_Well", key: "Sample_Well" },
+    { header: "Concentration", key: "Concentration" },
+    { header: "Cq", key: "Cq" },
+    { header: "Allowed_Spec", key: "Allowed_Spec" },
+    { header: "Details", key: "Details" }
+  ];
+  report.forEach(r => wsReport.addRow(r));
+  styleHeaderRow(wsReport, overallVerdict === "FAIL" ? "FFB42318" : NAVY);
+  wsReport.getColumn("Details").width = 60;
+  wsReport.getColumn("Details").alignment = { wrapText: true, vertical: "top" };
+  wsReport.eachRow((row, rowNum) => {
+    if (rowNum === 1) return;
+    const status = row.getCell("Status").value;
+    const bg = status === "FAIL" ? FAIL_BG : status === "WARN" ? WARN_BG : PASS_BG;
+    const txt = status === "FAIL" ? FAIL_TXT : status === "WARN" ? WARN_TXT : PASS_TXT;
+    row.getCell("Status").font = { bold: true, color: { argb: txt } };
+    row.eachCell(cell => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: bg } }; });
+  });
+  autoWidth(wsReport, 10, 60);
+  wsReport.getColumn("Details").width = 60;
+
+  // --- Linearity_Ranges sheet ---
+  const wsLin = wb.addWorksheet("Linearity_Ranges");
+  wsLin.columns = [
+    { header: "Concentration", key: "Concentration" },
+    { header: "Minimum_Cq", key: "Minimum_Cq" },
+    { header: "Maximum_Cq", key: "Maximum_Cq" }
+  ];
+  linearity.forEach(r => wsLin.addRow(r));
+  styleHeaderRow(wsLin, FOREST);
+  autoWidth(wsLin, 14, 30);
+
+  // --- QC_Metadata sheet ---
+  const wsMeta = wb.addWorksheet("QC_Metadata");
+  wsMeta.columns = [
+    { header: "Parameter", key: "Parameter" },
+    { header: "Value", key: "Value" }
+  ];
+  meta.forEach(r => wsMeta.addRow(r));
+  styleHeaderRow(wsMeta, NAVY);
+  const verdictRow = wsMeta.getRow(wsMeta.rowCount);
+  const vTxt = overallVerdict === "FAIL" ? FAIL_TXT : PASS_TXT;
+  const vBg = overallVerdict === "FAIL" ? FAIL_BG : PASS_BG;
+  verdictRow.getCell(2).font = { bold: true, color: { argb: vTxt } };
+  verdictRow.getCell(2).fill = { type: "pattern", pattern: "solid", fgColor: { argb: vBg } };
+  autoWidth(wsMeta, 14, 60);
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${run.meta.fileName.replace(/\.eds$/i,"")}_QC_Report.xlsx`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 function syncAxisInputs(){
